@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,27 @@
 #define SERVER_PORT 9000
 #define SERVER_ADDR "127.0.0.1"
 #define MAX_LINE 256
+
+static const struct {
+    const char *username;
+    const char *password;
+} player_db[] = {
+    {"praveen", "ppj123"},
+    {"arnav", "ao123"},
+    {"karthik", "skc123"},
+    {"varun", "ve123"},
+    {"hanish", "hp123"},
+    {"amartya", "av123"},
+};
+
+static int player_in_database(const char *username, const char *password) {
+    for (size_t i = 0; i < sizeof(player_db) / sizeof(player_db[0]); ++i) {
+        if (strcmp(player_db[i].username, username) == 0 && strcmp(player_db[i].password, password) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 static void trim_newline(char *s) {
     size_t len = strlen(s);
@@ -63,6 +85,25 @@ static int recv_line(int sock, char *buf, size_t buflen) {
         }
         pending_len += (size_t)n;
     }
+}
+
+static void *handle_approvals(void *sock_ptr) {
+    int sock = *(int *)sock_ptr;
+    char recv_buffer[MAX_LINE];
+    while (1) {
+        int n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
+        if (n <= 0) break;
+        if (strstr(recv_buffer, "APPROVE_REQUEST") == recv_buffer) {
+            char username[32];
+            int ranking;
+            sscanf(recv_buffer, "APPROVE_REQUEST %31s %d", username, &ranking);
+            // Decide: approve if ranking < 20
+            const char *response = (ranking < 20) ? "APPROVE\n" : "DENY\n";
+            send(sock, response, strlen(response), 0);
+        }
+        // Ignore other messages
+    }
+    return NULL;
 }
 
 int main(void) {
@@ -142,7 +183,11 @@ int main(void) {
         printf("Server: %s\n", recv_buffer);
         if (strcmp(recv_buffer, "OK Login successful") == 0) {
             logged_in = 1;
-            strcpy(logged_in_username, "admin");  // since admin username is fixed
+            strcpy(logged_in_username, "admin");
+            // Start approval thread
+            pthread_t approval_thread;
+            pthread_create(&approval_thread, NULL, handle_approvals, &sock);
+            pthread_detach(approval_thread);
         } else if (strcmp(recv_buffer, "OK Logout successful") == 0) {
             logged_in = 0;
             logged_in_username[0] = '\0';

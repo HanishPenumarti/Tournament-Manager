@@ -55,6 +55,7 @@ static int user_count = 0;
 static pthread_mutex_t users_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int listen_fd = -1;
 static int admin_logged_in = 0;
+static int admin_fd = -1;
 static pthread_mutex_t admin_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void trim_newline(char *s) {
@@ -169,9 +170,44 @@ static void *handle_client(void *arg) {
                     continue;
                 }
                 int db_ok = player_in_database(username, password);
-                if (!db_ok && ranking >= 20) {
-                    send_response(client_fd, "ERROR Registration denied: ranking must be below 20 or credentials in database");
-                    continue;
+                if (db_ok || ranking < 20) {
+                    // Register directly
+                } else {
+                    // Ask admin
+                    pthread_mutex_lock(&admin_mutex);
+                    if (admin_fd == -1) {
+                        pthread_mutex_unlock(&admin_mutex);
+                        send_response(client_fd, "ERROR No admin logged in");
+                        continue;
+                    }
+                    char request[MAX_LINE];
+                    snprintf(request, sizeof(request), "APPROVE_REQUEST %s %d\n", username, ranking);
+                    send(admin_fd, request, strlen(request), 0);
+                    char response[MAX_LINE];
+                    ssize_t n = 0;
+                    while (n < (ssize_t)sizeof(response) - 1) {
+                        ssize_t m = recv(admin_fd, response + n, 1, 0);
+                        if (m <= 0) break;
+                        if (response[n] == '\n') {
+                            n += m;
+                            break;
+                        }
+                        n += m;
+                    }
+                    if (n <= 0) {
+                        pthread_mutex_unlock(&admin_mutex);
+                        send_response(client_fd, "ERROR Admin connection lost");
+                        continue;
+                    }
+                    response[n] = '\0';
+                    trim_newline(response);
+                    int approve = strcmp(response, "APPROVE") == 0;
+                    pthread_mutex_unlock(&admin_mutex);
+                    if (!approve) {
+                        send_response(client_fd, "ERROR Registration denied by admin");
+                        continue;
+                    }
+                    // Register
                 }
             } else if (fields != 4) {
                 send_response(client_fd, "ERROR Expected: REGISTER <role> <username> <password>");
@@ -220,6 +256,7 @@ static void *handle_client(void *arg) {
                     continue;
                 }
                 admin_logged_in = 1;
+                admin_fd = client_fd;
                 pthread_mutex_unlock(&admin_mutex);
                 send_response(client_fd, "OK Login successful");
                 continue;
@@ -266,6 +303,7 @@ static void *handle_client(void *arg) {
                     continue;
                 }
                 admin_logged_in = 0;
+                admin_fd = -1;
                 pthread_mutex_unlock(&admin_mutex);
                 send_response(client_fd, "OK Logout successful");
                 continue;
