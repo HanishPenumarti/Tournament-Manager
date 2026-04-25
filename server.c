@@ -18,6 +18,27 @@
 #define ADMIN_USERNAME "admin"
 #define ADMIN_PASSWORD "penumarti@69"
 
+static const struct {
+    const char *username;
+    const char *password;
+} player_db[] = {
+    {"praveen", "ppj123"},
+    {"arnav", "ao123"},
+    {"karthik", "skc123"},
+    {"varun", "ve123"},
+    {"hanish", "hp123"},
+    {"amartya", "av123"},
+};
+
+static int player_in_database(const char *username, const char *password) {
+    for (size_t i = 0; i < sizeof(player_db) / sizeof(player_db[0]); ++i) {
+        if (strcmp(player_db[i].username, username) == 0 && strcmp(player_db[i].password, password) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 typedef struct {
     char role[16];
     char username[32];
@@ -64,7 +85,7 @@ static void *handle_client(void *arg) {
     free(arg);
 
     send_response(client_fd, "Welcome to Tennis Tournament Server");
-    send_response(client_fd, "Commands: CHECK <role> <username>, REGISTER <role> <username> <password>, LOGIN <role> <username> <password>, LOGOUT <role> <username>, QUIT");
+    send_response(client_fd, "Commands: CHECK <role> <username>, REGISTER <role> <username> <password> [ranking], LOGIN <role> <username> <password>, LOGOUT <role> <username>, QUIT");
 
     char buffer[MAX_LINE];
     while (1) {
@@ -87,8 +108,9 @@ static void *handle_client(void *arg) {
         char role[16];
         char username[32];
         char password[32];
+        char ranking_str[16] = "0";
 
-        int fields = sscanf(buffer, "%15s %15s %31s %31s", command, role, username, password);
+        int fields = sscanf(buffer, "%15s %15s %31s %31s %15s", command, role, username, password, ranking_str);
         if (fields < 1) {
             send_response(client_fd, "ERROR Invalid command format");
             continue;
@@ -134,6 +156,25 @@ static void *handle_client(void *arg) {
             }
             if (strcmp(role, "admin") == 0) {
                 send_response(client_fd, "ERROR Admin registration not allowed");
+                continue;
+            }
+            if (strcmp(role, "player") == 0) {
+                if (fields != 5) {
+                    send_response(client_fd, "ERROR Expected: REGISTER player <username> <password> <ranking>");
+                    continue;
+                }
+                int ranking = atoi(ranking_str);
+                if (ranking <= 0) {
+                    send_response(client_fd, "ERROR Ranking must be a positive integer");
+                    continue;
+                }
+                int db_ok = player_in_database(username, password);
+                if (!db_ok && ranking >= 20) {
+                    send_response(client_fd, "ERROR Registration denied: ranking must be below 20 or credentials in database");
+                    continue;
+                }
+            } else if (fields != 4) {
+                send_response(client_fd, "ERROR Expected: REGISTER <role> <username> <password>");
                 continue;
             }
             pthread_mutex_lock(&users_mutex);

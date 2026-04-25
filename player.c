@@ -116,6 +116,7 @@ int main(void) {
             if (strcmp(choice, "1") == 0 || strcasecmp(choice, "register") == 0) {
                 char username[64];
                 char password[64];
+                char ranking[16];
                 printf("Username: ");
                 if (!fgets(username, sizeof(username), stdin)) break;
                 trim_newline(username);
@@ -133,7 +134,10 @@ int main(void) {
                 printf("Password: ");
                 if (!fgets(password, sizeof(password), stdin)) break;
                 trim_newline(password);
-                snprintf(send_buffer, sizeof(send_buffer), "REGISTER player %s %s\n", username, password);
+                printf("AITA ranking: ");
+                if (!fgets(ranking, sizeof(ranking), stdin)) break;
+                trim_newline(ranking);
+                snprintf(send_buffer, sizeof(send_buffer), "REGISTER player %s %s %s\n", username, password, ranking);
                 send(sock, send_buffer, strlen(send_buffer), 0);
             } else if (strcmp(choice, "2") == 0 || strcasecmp(choice, "login") == 0) {
                 char username[64];
