@@ -106,9 +106,6 @@ int main(void) {
     if (recv_line(sock, recv_buffer, sizeof(recv_buffer)) > 0) {
         printf("%s\n", recv_buffer);
     }
-    if (recv_line(sock, recv_buffer, sizeof(recv_buffer)) > 0) {
-        printf("%s\n", recv_buffer);
-    }
 
     while (1) {
         if (logged_in) {

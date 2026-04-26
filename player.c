@@ -160,12 +160,27 @@ static int ball_side(int state) {
     return SIDE_RAMANUJAN;
 }
 
-static const char *point_label(int p) {
+static const char *raw_point_label(int p) {
     if (p <= 0) return "0";
     if (p == 1) return "15";
     if (p == 2) return "30";
-    if (p == 3) return "40";
-    return "AD";
+    return "40";
+}
+
+static void format_game_points(int server_points, int receiver_points, char *out, size_t outlen) {
+    if (server_points >= 3 && receiver_points >= 3) {
+        if (server_points == receiver_points) {
+            snprintf(out, outlen, "40-40");
+        } else if (server_points == receiver_points + 1) {
+            snprintf(out, outlen, "AD-40");
+        } else if (receiver_points == server_points + 1) {
+            snprintf(out, outlen, "40-AD");
+        } else {
+            snprintf(out, outlen, "%s-%s", raw_point_label(server_points), raw_point_label(receiver_points));
+        }
+        return;
+    }
+    snprintf(out, outlen, "%s-%s", raw_point_label(server_points), raw_point_label(receiver_points));
 }
 
 static void write_score_snapshot(const char *p1, const char *p2, int g1, int g2, int gp1, int gp2) {
@@ -179,12 +194,14 @@ static void write_score_snapshot(const char *p1, const char *p2, int g1, int g2,
         close(fd);
         return;
     }
+    char game_points[32];
+    format_game_points(gp1, gp2, game_points, sizeof(game_points));
     char out[512];
     snprintf(out, sizeof(out),
              "Match Score\n"
              "Set Games: %s %d - %d %s\n"
-             "Current Game Points: %s - %s\n",
-             p1, g1, g2, p2, point_label(gp1), point_label(gp2));
+             "Current Game Points: %s\n",
+             p1, g1, g2, p2, game_points);
     write(fd, out, strlen(out));
     lock.l_type = F_UNLCK;
     fcntl(fd, F_SETLK, &lock);
@@ -216,7 +233,7 @@ static int apply_point_result(int winner_p1, int *gp1, int *gp2) {
 
 static int run_match(const char *my_username, int my_player_no, const char *opponent_username,
                      const char *write_fifo_path, const char *read_fifo_path) {
-    printf("\n=== Match Started: %s vs %s ===\n", my_username, opponent_username);
+    printf("\n=== Match Started: %s vs %s ===\n\n", my_username, opponent_username);
     mkfifo(write_fifo_path, 0666);
     mkfifo(read_fifo_path, 0666);
 
@@ -231,6 +248,9 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
 
     srand((unsigned int)(time(NULL) ^ getpid()));
 
+    int my_is_p1 = (my_player_no == 1);
+    const char *p1_name = my_is_p1 ? my_username : opponent_username;
+    const char *p2_name = my_is_p1 ? opponent_username : my_username;
     int side_p1 = SIDE_RAMANUJAN;
     int initial_server_p1 = 1;
     char line[MAX_LINE];
@@ -248,11 +268,9 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
         int winner = (toss_call_bit == toss_result) ? 1 : 2;
         snprintf(line, sizeof(line), "TOSS %d %d\n", toss_result, winner);
         write(write_fd, line, strlen(line));
-        printf("Toss result is %s. Toss winner is Player%d.\n", toss_result == 0 ? "Heads" : "Tails", winner);
+        printf("Toss result is %s. Toss winner is %s.\n", toss_result == 0 ? "Heads" : "Tails", winner == 1 ? p1_name : p2_name);
     } else {
-        ssize_t n = read(read_fd, line, sizeof(line) - 1);
-        if (n <= 0) goto walkover_win;
-        line[n] = '\0';
+        if (fifo_read_line(read_fd, line, sizeof(line)) <= 0) goto walkover_win;
         printf("Waiting for Player1 toss call...\n");
     }
 
@@ -277,9 +295,7 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
             printf("You chose to serve first.\n");
             printf("Waiting for opponent to choose side...\n");
             while (1) {
-                ssize_t n = read(read_fd, line, sizeof(line) - 1);
-                if (n <= 0) goto walkover_win;
-                line[n] = '\0';
+                if (fifo_read_line(read_fd, line, sizeof(line)) <= 0) goto walkover_win;
                 int loser_side;
                 if (sscanf(line, "LRESP SIDE %d", &loser_side) == 1) {
                     if (toss_winner == 1) side_p1 = (loser_side == SIDE_RAMANUJAN) ? SIDE_LILAVATI : SIDE_RAMANUJAN;
@@ -301,9 +317,7 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
             write(write_fd, line, strlen(line));
             printf("You chose side. Waiting for opponent to choose serve/receive...\n");
             while (1) {
-                ssize_t n = read(read_fd, line, sizeof(line) - 1);
-                if (n <= 0) goto walkover_win;
-                line[n] = '\0';
+                if (fifo_read_line(read_fd, line, sizeof(line)) <= 0) goto walkover_win;
                 int loser_decision;
                 if (sscanf(line, "LRESP SR %d", &loser_decision) == 1) {
                     if (toss_winner == 1) side_p1 = winner_side;
@@ -315,9 +329,7 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
         }
     } else {
         while (1) {
-            ssize_t n = read(read_fd, line, sizeof(line) - 1);
-            if (n <= 0) goto walkover_win;
-            line[n] = '\0';
+            if (fifo_read_line(read_fd, line, sizeof(line)) <= 0) goto walkover_win;
             int winner_side;
             if (strstr(line, "WCHOICE SERVE") == line) {
                 printf("You lost toss. Toss winner chose to serve first.\n");
@@ -357,7 +369,8 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
 
     int games_p1 = 0, games_p2 = 0;
     int gp1 = 0, gp2 = 0;
-    int my_is_p1 = (my_player_no == 1);
+    printf("\n========================================\n");
+    printf("Match play begins now.\n");
     while (games_p1 < 6 && games_p2 < 6) {
         int game_index = games_p1 + games_p2;
         int server_is_p1 = (game_index % 2 == 0) ? initial_server_p1 : !initial_server_p1;
@@ -365,9 +378,15 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
         int my_side = my_is_p1 ? side_p1 : (1 - side_p1);
         int server_side = server_is_p1 ? side_p1 : (1 - side_p1);
         int receiver_side = (server_side == SIDE_RAMANUJAN) ? SIDE_LILAVATI : SIDE_RAMANUJAN;
+        const char *server_name = server_is_p1 ? p1_name : p2_name;
+        const char *receiver_name = server_is_p1 ? p2_name : p1_name;
 
-        printf("\nGame %d | Set score: %d-%d | You are on %s side\n",
-               game_index + 1, games_p1, games_p2, my_side == SIDE_RAMANUJAN ? "Ramanujan" : "Lilavati");
+        printf("========================================\n");
+        printf("Game %d\n", game_index + 1);
+        printf("Set score: %s %d - %d %s\n", server_name,
+               server_is_p1 ? games_p1 : games_p2, server_is_p1 ? games_p2 : games_p1, receiver_name);
+        printf("Current side: %s\n", my_side == SIDE_RAMANUJAN ? "Ramanujan" : "Lilavati");
+        printf("========================================\n");
 
         while (1) {
             int current_state = (receiver_side == SIDE_RAMANUJAN) ? BALL_RAM_RIGHT : BALL_LILA_RIGHT;
@@ -396,16 +415,15 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
 
             int point_winner_p1 = -1;
             while (point_winner_p1 == -1) {
+                printf("\n----------------------------------------\n");
                 if (i_turn) {
                     if (ball_side(current_state) != my_side) {
                         point_winner_p1 = my_is_p1 ? 0 : 1;
                         break;
                     }
-                    printf("Waiting for your shot input...\n");
-                    printf("Ball is on your side.\n");
                     printf("Enter shot choice:\n");
-                    printf("1) Down the line (must enter within 10 seconds)\n");
-                    printf("2) Cross court (must enter within 10 seconds)\n");
+                    printf("1) Down the line\n");
+                    printf("2) Cross court\n");
                     printf("Enter choice (1 or 2): ");
                     fflush(stdout);
                     int shot = 1;
@@ -414,6 +432,7 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
                     int limit_ok = (status == 1);
                     if (limit_ok && elapsed > 10.0) limit_ok = 0;
                     if (!limit_ok) {
+                        printf("\n");
                         if (!fifo_send_line(write_fd, "MISS\n")) goto walkover_win;
                         point_winner_p1 = my_is_p1 ? 0 : 1;
                         break;
@@ -437,39 +456,56 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
             }
 
             int i_won_point = (point_winner_p1 == 1 && my_is_p1) || (point_winner_p1 == 0 && !my_is_p1);
-            int game_winner = apply_point_result(point_winner_p1 == 1, &gp1, &gp2);
+            int game_winner = 0;
             if (i_won_point) {
+                game_winner = apply_point_result(point_winner_p1 == 1, &gp1, &gp2);
+                if (game_winner == 1) {
+                    games_p1++;
+                    gp1 = 0;
+                    gp2 = 0;
+                } else if (game_winner == 2) {
+                    games_p2++;
+                    gp1 = 0;
+                    gp2 = 0;
+                }
                 write_score_snapshot(my_is_p1 ? my_username : opponent_username,
                                      my_is_p1 ? opponent_username : my_username,
                                      games_p1, games_p2, gp1, gp2);
                 char point_msg[MAX_LINE];
-                snprintf(point_msg, sizeof(point_msg), "POINT %d %d %d %d %d\n",
-                         point_winner_p1, games_p1, games_p2, gp1, gp2);
+                snprintf(point_msg, sizeof(point_msg), "POINT %d %d %d %d %d %d\n",
+                         point_winner_p1, games_p1, games_p2, gp1, gp2, game_winner);
                 if (!fifo_send_line(write_fd, point_msg)) goto walkover_win;
             } else {
                 if (fifo_read_line(read_fd, line, sizeof(line)) <= 0) goto walkover_win;
-                int winner_msg, g1m, g2m, gp1m, gp2m;
-                if (sscanf(line, "POINT %d %d %d %d %d", &winner_msg, &g1m, &g2m, &gp1m, &gp2m) == 5) {
+                int winner_msg, g1m, g2m, gp1m, gp2m, gwm;
+                if (sscanf(line, "POINT %d %d %d %d %d %d", &winner_msg, &g1m, &g2m, &gp1m, &gp2m, &gwm) == 6) {
                     games_p1 = g1m;
                     games_p2 = g2m;
                     gp1 = gp1m;
                     gp2 = gp2m;
+                    game_winner = gwm;
                     (void)winner_msg;
                 }
             }
-            printf("Point: %s | Game points now: %s-%s\n",
-                   point_winner_p1 == 1 ? (my_is_p1 ? "You" : "Opponent") : (my_is_p1 ? "Opponent" : "You"),
-                   point_label(gp1), point_label(gp2));
+            char game_points_display[32];
+            int server_points = server_is_p1 ? gp1 : gp2;
+            int receiver_points = server_is_p1 ? gp2 : gp1;
+            format_game_points(server_points, receiver_points, game_points_display, sizeof(game_points_display));
+            const char *point_winner_name = (point_winner_p1 == 1) ? p1_name : p2_name;
+            printf("\n----------------------------------------\n");
+            printf("**Point won by: %s**\n", point_winner_name);
+            printf("**Game points: %s**\n", game_points_display);
+            printf("----------------------------------------\n");
 
-            if (game_winner == 1) {
-                games_p1++;
-                gp1 = gp2 = 0;
-                printf("Game won by %s. Set score: %d-%d\n", my_is_p1 ? "You/Opponent(P1)" : "Opponent(P1)", games_p1, games_p2);
-                break;
-            } else if (game_winner == 2) {
-                games_p2++;
-                gp1 = gp2 = 0;
-                printf("Game won by %s. Set score: %d-%d\n", my_is_p1 ? "Opponent(P2)" : "You/Opponent(P2)", games_p1, games_p2);
+            if (game_winner == 1 || game_winner == 2) {
+                const char *game_winner_name = (game_winner == 1) ? p1_name : p2_name;
+                printf("\n========================================\n");
+                printf("Game won by: %s\n", game_winner_name);
+                printf("Set score: %s %d - %d %s\n", server_name,
+                       server_is_p1 ? games_p1 : games_p2,
+                       server_is_p1 ? games_p2 : games_p1,
+                       receiver_name);
+                printf("========================================\n");
                 break;
             }
         }
@@ -481,14 +517,21 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
     }
 
     int p1_won = games_p1 >= 6;
-    int i_won_set = (my_player_no == 1) ? p1_won : !p1_won;
-    printf("\nMatch over. %s won the set %d-%d.\n", i_won_set ? "You" : "Opponent", games_p1, games_p2);
+    const char *set_winner = p1_won ? p1_name : p2_name;
+    printf("\n========================================\n");
+    printf("MATCH COMPLETE\n");
+    printf("Winner: %s\n", set_winner);
+    printf("Final set score: %s %d - %d %s\n", p1_name, games_p1, games_p2, p2_name);
+    printf("========================================\n");
     close(write_fd);
     close(read_fd);
-    return i_won_set ? 1 : 0;
+    return ((my_player_no == 1) ? p1_won : !p1_won) ? 1 : 0;
 
 walkover_win:
-    printf("\nOpponent disconnected. You win by walkover.\n");
+    printf("\n========================================\n");
+    printf("Match ended by disconnection.\n");
+    printf("Winner by walkover: %s\n", my_username);
+    printf("========================================\n");
     close(write_fd);
     close(read_fd);
     return 1;
@@ -515,9 +558,6 @@ int main(void) {
     char logged_in_username[64] = "";
     ssize_t n;
     char recv_buffer[MAX_LINE];
-    if (recv_line(sock, recv_buffer, sizeof(recv_buffer)) > 0) {
-        printf("%s\n", recv_buffer);
-    }
     if (recv_line(sock, recv_buffer, sizeof(recv_buffer)) > 0) {
         printf("%s\n", recv_buffer);
     }

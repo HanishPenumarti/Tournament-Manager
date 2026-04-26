@@ -153,7 +153,6 @@ static void *handle_client(void *arg) {
     free(arg);
 
     send_response(client_fd, "Welcome to Tennis Tournament Server");
-    send_response(client_fd, "Commands: CHECK <role> <username>, REGISTER <role> <username> <password> [ranking], LOGIN <role> <username> <password>, LOGOUT <role> <username>, QUIT");
 
     char buffer[MAX_LINE];
     while (1) {
