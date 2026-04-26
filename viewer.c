@@ -1,8 +1,10 @@
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -10,6 +12,7 @@
 #define SERVER_PORT 9001
 #define SERVER_ADDR "127.0.0.1"
 #define MAX_LINE 256
+#define SCORE_FILE "match_score.txt"
 
 static void trim_newline(char *s) {
     size_t len = strlen(s);
@@ -65,6 +68,49 @@ static int recv_line(int sock, char *buf, size_t buflen) {
     }
 }
 
+static void print_score_file_snapshot(void) {
+    int fd = open(SCORE_FILE, O_RDONLY);
+    if (fd < 0) {
+        printf("\n[Viewer] Score file not available yet.\n");
+        return;
+    }
+
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_RDLCK;
+    lock.l_whence = SEEK_SET;
+    if (fcntl(fd, F_SETLKW, &lock) == -1) {
+        close(fd);
+        return;
+    }
+
+    char data[1024];
+    ssize_t n = read(fd, data, sizeof(data) - 1);
+    if (n > 0) {
+        data[n] = '\0';
+        printf("\n============= LIVE MATCH SCORE =============\n%s============================================\n", data);
+    }
+
+    lock.l_type = F_UNLCK;
+    fcntl(fd, F_SETLK, &lock);
+    close(fd);
+}
+
+static int handle_server_line(const char *line, int *logged_in, char *logged_in_username) {
+    if (strcmp(line, "SCORE_UPDATE") == 0) {
+        print_score_file_snapshot();
+        return 1;
+    }
+    printf("Server: %s\n", line);
+    if (strcmp(line, "OK Login successful") == 0) {
+        *logged_in = 1;
+    } else if (strcmp(line, "OK Logout successful") == 0) {
+        *logged_in = 0;
+        logged_in_username[0] = '\0';
+    }
+    return 1;
+}
+
 int main(void) {
     printf("Viewer client connecting to %s:%d...\n", SERVER_ADDR, SERVER_PORT);
     int sock = connect_to_server();
@@ -85,14 +131,32 @@ int main(void) {
             printf("1) Logout\n");
             printf("2) Quit\n");
             printf("Choice: ");
+            fflush(stdout);
+
+            fd_set wait_set;
+            FD_ZERO(&wait_set);
+            FD_SET(STDIN_FILENO, &wait_set);
+            FD_SET(sock, &wait_set);
+            int maxfd = (sock > STDIN_FILENO) ? sock : STDIN_FILENO;
+            int ready = select(maxfd + 1, &wait_set, NULL, NULL, NULL);
+            if (ready < 0) {
+                perror("select");
+                break;
+            }
+            if (FD_ISSET(sock, &wait_set)) {
+                n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
+                if (n <= 0) break;
+                handle_server_line(recv_buffer, &logged_in, logged_in_username);
+                continue;
+            }
         } else {
             printf("\nViewer menu:\n");
             printf("1) Register\n");
             printf("2) Login\n");
             printf("3) Quit\n");
             printf("Choice: ");
+            fflush(stdout);
         }
-        fflush(stdout);
 
         char choice[8];
         if (!fgets(choice, sizeof(choice), stdin)) break;
@@ -165,15 +229,10 @@ int main(void) {
             }
         }
 
-        n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
-        if (n <= 0) break;
-        printf("Server: %s\n", recv_buffer);
-        if (strcmp(recv_buffer, "OK Login successful") == 0) {
-            logged_in = 1;
-            // logged_in_username is set in the login block above
-        } else if (strcmp(recv_buffer, "OK Logout successful") == 0) {
-            logged_in = 0;
-            logged_in_username[0] = '\0';
+        if (!logged_in || strcmp(choice, "1") == 0 || strcasecmp(choice, "logout") == 0) {
+            n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
+            if (n <= 0) break;
+            handle_server_line(recv_buffer, &logged_in, logged_in_username);
         }
     }
 

@@ -125,6 +125,31 @@ static int get_logged_in_fd(const char *role, const char *username) {
     return fd;
 }
 
+static int is_logged_in_role_fd(int fd, const char *role) {
+    int ok = 0;
+    pthread_mutex_lock(&sessions_mutex);
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (sessions[i].active && sessions[i].logged_in && sessions[i].fd == fd &&
+            strcmp(sessions[i].role, role) == 0) {
+            ok = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&sessions_mutex);
+    return ok;
+}
+
+static void notify_all_viewers_score_update(void) {
+    pthread_mutex_lock(&sessions_mutex);
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (sessions[i].active && sessions[i].logged_in &&
+            strcmp(sessions[i].role, "viewer") == 0) {
+            send(sessions[i].fd, "SCORE_UPDATE\n", 13, 0);
+        }
+    }
+    pthread_mutex_unlock(&sessions_mutex);
+}
+
 static void trim_newline(char *s) {
     size_t len = strlen(s);
     if (len && (s[len - 1] == '\n' || s[len - 1] == '\r')) {
@@ -188,6 +213,15 @@ static void *handle_client(void *arg) {
         if (strcmp(command, "QUIT") == 0) {
             send_response(client_fd, "Goodbye");
             break;
+        }
+
+        if (strcmp(command, "SCORE_UPDATE") == 0) {
+            if (!is_logged_in_role_fd(client_fd, "player")) {
+                send_response(client_fd, "ERROR Only logged-in players can send score updates");
+                continue;
+            }
+            notify_all_viewers_score_update();
+            continue;
         }
 
         if (strcmp(command, "CHECK") == 0) {

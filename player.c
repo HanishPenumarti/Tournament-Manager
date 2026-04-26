@@ -231,7 +231,7 @@ static int apply_point_result(int winner_p1, int *gp1, int *gp2) {
     return 0;
 }
 
-static int run_match(const char *my_username, int my_player_no, const char *opponent_username,
+static int run_match(int sock, const char *my_username, int my_player_no, const char *opponent_username,
                      const char *write_fifo_path, const char *read_fifo_path) {
     printf("\n=== Match Started: %s vs %s ===\n\n", my_username, opponent_username);
     mkfifo(write_fifo_path, 0666);
@@ -471,6 +471,9 @@ static int run_match(const char *my_username, int my_player_no, const char *oppo
                 write_score_snapshot(my_is_p1 ? my_username : opponent_username,
                                      my_is_p1 ? opponent_username : my_username,
                                      games_p1, games_p2, gp1, gp2);
+                if (sock >= 0) {
+                    send(sock, "SCORE_UPDATE\n", 13, 0);
+                }
                 char point_msg[MAX_LINE];
                 snprintf(point_msg, sizeof(point_msg), "POINT %d %d %d %d %d %d\n",
                          point_winner_p1, games_p1, games_p2, gp1, gp2, game_winner);
@@ -537,12 +540,12 @@ walkover_win:
     return 1;
 }
 
-static int handle_server_line(int logged_in, const char *logged_in_username, const char *line) {
+static int handle_server_line(int sock, int logged_in, const char *logged_in_username, const char *line) {
     if (strncmp(line, "MATCH_START", 11) == 0 && logged_in) {
         char role[8], opponent[64], write_fifo[128], read_fifo[128];
         if (sscanf(line, "MATCH_START %7s %63s %127s %127s", role, opponent, write_fifo, read_fifo) == 4) {
             int my_no = (strcmp(role, "P1") == 0) ? 1 : 2;
-            run_match(logged_in_username, my_no, opponent, write_fifo, read_fifo);
+            run_match(sock, logged_in_username, my_no, opponent, write_fifo, read_fifo);
             return 1;
         }
     }
@@ -583,7 +586,7 @@ int main(void) {
             if (FD_ISSET(sock, &wait_set)) {
                 n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
                 if (n <= 0) break;
-                if (handle_server_line(logged_in, logged_in_username, recv_buffer)) continue;
+                if (handle_server_line(sock, logged_in, logged_in_username, recv_buffer)) continue;
                 printf("\nServer: %s\n", recv_buffer);
                 if (strcmp(recv_buffer, "OK Logout successful") == 0) {
                     logged_in = 0;
@@ -677,7 +680,7 @@ int main(void) {
 
         n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
         if (n <= 0) break;
-        if (handle_server_line(logged_in, logged_in_username, recv_buffer)) continue;
+        if (handle_server_line(sock, logged_in, logged_in_username, recv_buffer)) continue;
         printf("Server: %s\n", recv_buffer);
         if (strcmp(recv_buffer, "OK Login successful") == 0) {
             logged_in = 1;
