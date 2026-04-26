@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ctype.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
@@ -10,10 +11,11 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define SERVER_PORT 9000
+#define SERVER_PORT 9001
 #define MAX_CLIENTS 64
 #define MAX_USERS 256
 #define MAX_LINE 256
+#define MAX_SESSIONS 128
 
 #define ADMIN_USERNAME "admin"
 #define ADMIN_PASSWORD "penumarti@69"
@@ -57,6 +59,71 @@ static int listen_fd = -1;
 static int admin_logged_in = 0;
 static int admin_fd = -1;
 static pthread_mutex_t admin_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    int fd;
+    int active;
+    int logged_in;
+    char role[16];
+    char username[32];
+} Session;
+
+static Session sessions[MAX_SESSIONS];
+static pthread_mutex_t sessions_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int registered_player_count = 0;
+
+static void clear_session_fd(int fd) {
+    pthread_mutex_lock(&sessions_mutex);
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (sessions[i].active && sessions[i].fd == fd) {
+            sessions[i].active = 0;
+            sessions[i].logged_in = 0;
+            sessions[i].role[0] = '\0';
+            sessions[i].username[0] = '\0';
+            break;
+        }
+    }
+    pthread_mutex_unlock(&sessions_mutex);
+}
+
+static void upsert_session_login(int fd, const char *role, const char *username, int logged_in) {
+    pthread_mutex_lock(&sessions_mutex);
+    int slot = -1;
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (sessions[i].active && sessions[i].fd == fd) {
+            slot = i;
+            break;
+        }
+        if (!sessions[i].active && slot == -1) {
+            slot = i;
+        }
+    }
+    if (slot >= 0) {
+        sessions[slot].fd = fd;
+        sessions[slot].active = 1;
+        sessions[slot].logged_in = logged_in;
+        strncpy(sessions[slot].role, role, sizeof(sessions[slot].role) - 1);
+        sessions[slot].role[sizeof(sessions[slot].role) - 1] = '\0';
+        strncpy(sessions[slot].username, username, sizeof(sessions[slot].username) - 1);
+        sessions[slot].username[sizeof(sessions[slot].username) - 1] = '\0';
+    }
+    pthread_mutex_unlock(&sessions_mutex);
+}
+
+static int get_logged_in_fd(const char *role, const char *username) {
+    int fd = -1;
+    pthread_mutex_lock(&sessions_mutex);
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (sessions[i].active && sessions[i].logged_in &&
+            strcmp(sessions[i].role, role) == 0 &&
+            strcmp(sessions[i].username, username) == 0) {
+            fd = sessions[i].fd;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&sessions_mutex);
+    return fd;
+}
 
 static void trim_newline(char *s) {
     size_t len = strlen(s);
@@ -117,12 +184,14 @@ static void *handle_client(void *arg) {
             continue;
         }
 
-        if (strcasecmp(command, "QUIT") == 0) {
+        for (size_t i = 0; command[i]; ++i) command[i] = (char)toupper((unsigned char)command[i]);
+
+        if (strcmp(command, "QUIT") == 0) {
             send_response(client_fd, "Goodbye");
             break;
         }
 
-        if (strcasecmp(command, "CHECK") == 0) {
+        if (strcmp(command, "CHECK") == 0) {
             if (fields != 3) {
                 send_response(client_fd, "ERROR Expected: CHECK <role> <username>");
                 continue;
@@ -150,7 +219,7 @@ static void *handle_client(void *arg) {
             continue;
         }
 
-        if (strcasecmp(command, "REGISTER") == 0) {
+        if (strcmp(command, "REGISTER") == 0) {
             if (!is_valid_role(role)) {
                 send_response(client_fd, "ERROR Role must be admin, player, or viewer");
                 continue;
@@ -162,6 +231,10 @@ static void *handle_client(void *arg) {
             if (strcmp(role, "player") == 0) {
                 if (fields != 5) {
                     send_response(client_fd, "ERROR Expected: REGISTER player <username> <password> <ranking>");
+                    continue;
+                }
+                if (registered_player_count >= 2) {
+                    send_response(client_fd, "ERROR Only first two player registrations are allowed");
                     continue;
                 }
                 int ranking = atoi(ranking_str);
@@ -232,10 +305,13 @@ static void *handle_client(void *arg) {
             users[user_count].username[sizeof(users[user_count].username) - 1] = '\0';
             users[user_count].password[sizeof(users[user_count].password) - 1] = '\0';
             user_count++;
+            if (strcmp(role, "player") == 0) {
+                registered_player_count++;
+            }
             pthread_mutex_unlock(&users_mutex);
             send_response(client_fd, "OK Registered successfully");
 
-        } else if (strcasecmp(command, "LOGIN") == 0) {
+        } else if (strcmp(command, "LOGIN") == 0) {
             if (!is_valid_role(role)) {
                 send_response(client_fd, "ERROR Role must be admin, player, or viewer");
                 continue;
@@ -258,6 +334,7 @@ static void *handle_client(void *arg) {
                 admin_logged_in = 1;
                 admin_fd = client_fd;
                 pthread_mutex_unlock(&admin_mutex);
+                upsert_session_login(client_fd, "admin", ADMIN_USERNAME, 1);
                 send_response(client_fd, "OK Login successful");
                 continue;
             }
@@ -280,9 +357,10 @@ static void *handle_client(void *arg) {
             }
             users[idx].logged_in = 1;
             pthread_mutex_unlock(&users_mutex);
+            upsert_session_login(client_fd, role, username, 1);
             send_response(client_fd, "OK Login successful");
 
-        } else if (strcasecmp(command, "LOGOUT") == 0) {
+        } else if (strcmp(command, "LOGOUT") == 0) {
             if (fields != 3) {
                 send_response(client_fd, "ERROR Expected: LOGOUT <role> <username>");
                 continue;
@@ -305,6 +383,7 @@ static void *handle_client(void *arg) {
                 admin_logged_in = 0;
                 admin_fd = -1;
                 pthread_mutex_unlock(&admin_mutex);
+                upsert_session_login(client_fd, "admin", ADMIN_USERNAME, 0);
                 send_response(client_fd, "OK Logout successful");
                 continue;
             }
@@ -322,12 +401,63 @@ static void *handle_client(void *arg) {
             }
             users[idx].logged_in = 0;
             pthread_mutex_unlock(&users_mutex);
+            upsert_session_login(client_fd, role, username, 0);
             send_response(client_fd, "OK Logout successful");
+
+        } else if (strcmp(command, "START_MATCH") == 0) {
+            char p1[32];
+            char p2[32];
+            if (sscanf(buffer, "%*s %31s %31s", p1, p2) != 2) {
+                send_response(client_fd, "ERROR Expected: START_MATCH <player1> <player2>");
+                continue;
+            }
+            pthread_mutex_lock(&admin_mutex);
+            int is_admin_sender = admin_logged_in && admin_fd == client_fd;
+            pthread_mutex_unlock(&admin_mutex);
+            if (!is_admin_sender) {
+                send_response(client_fd, "ERROR Only logged-in admin can start match");
+                continue;
+            }
+            if (strcmp(p1, p2) == 0) {
+                send_response(client_fd, "ERROR Players must be different");
+                continue;
+            }
+            int p1_fd = get_logged_in_fd("player", p1);
+            int p2_fd = get_logged_in_fd("player", p2);
+            if (p1_fd < 0 || p2_fd < 0) {
+                send_response(client_fd, "ERROR Both players must be logged in");
+                continue;
+            }
+            const char *fifo_a = "/tmp/tm_p1_to_p2_fifo";
+            const char *fifo_b = "/tmp/tm_p2_to_p1_fifo";
+            char msg[MAX_LINE];
+            snprintf(msg, sizeof(msg), "MATCH_START P1 %s %s %s\n", p2, fifo_a, fifo_b);
+            send(p1_fd, msg, strlen(msg), 0);
+            snprintf(msg, sizeof(msg), "MATCH_START P2 %s %s %s\n", p1, fifo_b, fifo_a);
+            send(p2_fd, msg, strlen(msg), 0);
+            send_response(client_fd, "OK Match start sent");
 
         } else {
             send_response(client_fd, "ERROR Unknown command");
         }
     }
+
+    pthread_mutex_lock(&admin_mutex);
+    if (admin_fd == client_fd) {
+        admin_fd = -1;
+        admin_logged_in = 0;
+    }
+    pthread_mutex_unlock(&admin_mutex);
+
+    pthread_mutex_lock(&users_mutex);
+    for (int i = 0; i < user_count; ++i) {
+        int sfd = get_logged_in_fd(users[i].role, users[i].username);
+        if (sfd == client_fd) {
+            users[i].logged_in = 0;
+        }
+    }
+    pthread_mutex_unlock(&users_mutex);
+    clear_session_fd(client_fd);
 
     close(client_fd);
     return NULL;

@@ -7,7 +7,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define SERVER_PORT 9000
+#define SERVER_PORT 9001
 #define SERVER_ADDR "127.0.0.1"
 #define MAX_LINE 256
 

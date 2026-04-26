@@ -1,37 +1,16 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#define SERVER_PORT 9000
+#define SERVER_PORT 9001
 #define SERVER_ADDR "127.0.0.1"
 #define MAX_LINE 256
-
-static const struct {
-    const char *username;
-    const char *password;
-} player_db[] = {
-    {"praveen", "ppj123"},
-    {"arnav", "ao123"},
-    {"karthik", "skc123"},
-    {"varun", "ve123"},
-    {"hanish", "hp123"},
-    {"amartya", "av123"},
-};
-
-static int player_in_database(const char *username, const char *password) {
-    for (size_t i = 0; i < sizeof(player_db) / sizeof(player_db[0]); ++i) {
-        if (strcmp(player_db[i].username, username) == 0 && strcmp(player_db[i].password, password) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
 
 static void trim_newline(char *s) {
     size_t len = strlen(s);
@@ -87,23 +66,31 @@ static int recv_line(int sock, char *buf, size_t buflen) {
     }
 }
 
-static void *handle_approvals(void *sock_ptr) {
-    int sock = *(int *)sock_ptr;
-    char recv_buffer[MAX_LINE];
-    while (1) {
-        int n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
-        if (n <= 0) break;
-        if (strstr(recv_buffer, "APPROVE_REQUEST") == recv_buffer) {
-            char username[32];
-            int ranking;
-            sscanf(recv_buffer, "APPROVE_REQUEST %31s %d", username, &ranking);
-            // Decide: approve if ranking < 20
-            const char *response = (ranking < 20) ? "APPROVE\n" : "DENY\n";
-            send(sock, response, strlen(response), 0);
+static int handle_server_message(int sock, int *logged_in, char *logged_in_username, const char *msg) {
+    if (strncmp(msg, "APPROVE_REQUEST ", 16) == 0) {
+        char username[32];
+        int ranking = 0;
+        if (sscanf(msg, "APPROVE_REQUEST %31s %d", username, &ranking) == 2) {
+            if (ranking < 20) {
+                send(sock, "APPROVE\n", 8, 0);
+                printf("\nAuto-approved registration for %s (ranking %d).\n", username, ranking);
+            } else {
+                send(sock, "DENY\n", 5, 0);
+                printf("\nAuto-denied registration for %s (ranking %d).\n", username, ranking);
+            }
         }
-        // Ignore other messages
+        return 1;
     }
-    return NULL;
+
+    printf("Server: %s\n", msg);
+    if (strcmp(msg, "OK Login successful") == 0) {
+        *logged_in = 1;
+        strcpy(logged_in_username, "admin");
+    } else if (strcmp(msg, "OK Logout successful") == 0) {
+        *logged_in = 0;
+        logged_in_username[0] = '\0';
+    }
+    return 1;
 }
 
 int main(void) {
@@ -126,26 +113,57 @@ int main(void) {
     while (1) {
         if (logged_in) {
             printf("\nLogged in as %s\n", logged_in_username);
-            printf("1) Logout\n");
-            printf("2) Quit\n");
+            printf("1) Start Match\n");
+            printf("2) Logout\n");
+            printf("3) Quit\n");
             printf("Choice: ");
+            fflush(stdout);
+
+            fd_set set;
+            FD_ZERO(&set);
+            FD_SET(sock, &set);
+            FD_SET(STDIN_FILENO, &set);
+            int maxfd = (sock > STDIN_FILENO) ? sock : STDIN_FILENO;
+            int ready = select(maxfd + 1, &set, NULL, NULL, NULL);
+            if (ready < 0) {
+                perror("select");
+                break;
+            }
+
+            if (FD_ISSET(sock, &set)) {
+                n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
+                if (n <= 0) break;
+                if (!handle_server_message(sock, &logged_in, logged_in_username, recv_buffer)) break;
+                continue;
+            }
         } else {
             printf("\nAdmin menu:\n");
             printf("1) Login\n");
             printf("2) Quit\n");
             printf("Choice: ");
+            fflush(stdout);
         }
-        fflush(stdout);
 
         char choice[8];
         if (!fgets(choice, sizeof(choice), stdin)) break;
         trim_newline(choice);
         if (logged_in) {
-            if (strcmp(choice, "1") == 0 || strcasecmp(choice, "logout") == 0) {
+            if (strcmp(choice, "1") == 0 || strcasecmp(choice, "start") == 0) {
+                char p1[64], p2[64];
+                char send_buffer[MAX_LINE];
+                printf("Player 1 username: ");
+                if (!fgets(p1, sizeof(p1), stdin)) break;
+                trim_newline(p1);
+                printf("Player 2 username: ");
+                if (!fgets(p2, sizeof(p2), stdin)) break;
+                trim_newline(p2);
+                snprintf(send_buffer, sizeof(send_buffer), "START_MATCH %s %s\n", p1, p2);
+                send(sock, send_buffer, strlen(send_buffer), 0);
+            } else if (strcmp(choice, "2") == 0 || strcasecmp(choice, "logout") == 0) {
                 char send_buffer[MAX_LINE];
                 snprintf(send_buffer, sizeof(send_buffer), "LOGOUT admin %s\n", logged_in_username);
                 send(sock, send_buffer, strlen(send_buffer), 0);
-            } else if (strcmp(choice, "2") == 0 || strcasecmp(choice, "quit") == 0) {
+            } else if (strcmp(choice, "3") == 0 || strcasecmp(choice, "quit") == 0) {
                 send(sock, "QUIT\n", 5, 0);
                 break;
             } else {
@@ -180,18 +198,7 @@ int main(void) {
 
         n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
         if (n <= 0) break;
-        printf("Server: %s\n", recv_buffer);
-        if (strcmp(recv_buffer, "OK Login successful") == 0) {
-            logged_in = 1;
-            strcpy(logged_in_username, "admin");
-            // Start approval thread
-            pthread_t approval_thread;
-            pthread_create(&approval_thread, NULL, handle_approvals, &sock);
-            pthread_detach(approval_thread);
-        } else if (strcmp(recv_buffer, "OK Logout successful") == 0) {
-            logged_in = 0;
-            logged_in_username[0] = '\0';
-        }
+        if (!handle_server_message(sock, &logged_in, logged_in_username, recv_buffer)) break;
     }
 
     close(sock);
