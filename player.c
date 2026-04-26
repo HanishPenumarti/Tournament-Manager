@@ -183,7 +183,9 @@ static void format_game_points(int server_points, int receiver_points, char *out
     snprintf(out, outlen, "%s-%s", raw_point_label(server_points), raw_point_label(receiver_points));
 }
 
-static void write_score_snapshot(const char *p1, const char *p2, int g1, int g2, int gp1, int gp2) {
+static void write_score_snapshot(const char *left_name, const char *right_name,
+                                 int g1, int g2, int gp1, int gp2,
+                                 const char *server_name, const char *toss_summary) {
     int fd = open(SCORE_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return;
     struct flock lock;
@@ -194,20 +196,33 @@ static void write_score_snapshot(const char *p1, const char *p2, int g1, int g2,
         close(fd);
         return;
     }
+
     char game_points[32];
     format_game_points(gp1, gp2, game_points, sizeof(game_points));
     char out[512];
-    snprintf(out, sizeof(out),
-             "Match Score\n"
-             "Set Games: %s %d - %d %s\n"
-             "Current Game Points: %s\n",
-             p1, g1, g2, p2, game_points);
+    if (toss_summary && toss_summary[0]) {
+        snprintf(out, sizeof(out),
+                 "Match Score\n"
+                 "Set Games: %s %d - %d %s\n"
+                 "Current Game Points: %s\n"
+                 "Serving: %s\n"
+                 "Toss: %s\n",
+                 left_name, g1, g2, right_name,
+                 game_points, server_name, toss_summary);
+    } else {
+        snprintf(out, sizeof(out),
+                 "Match Score\n"
+                 "Set Games: %s %d - %d %s\n"
+                 "Current Game Points: %s\n"
+                 "Serving: %s\n",
+                 left_name, g1, g2, right_name,
+                 game_points, server_name);
+    }
     write(fd, out, strlen(out));
     lock.l_type = F_UNLCK;
     fcntl(fd, F_SETLK, &lock);
     close(fd);
 }
-
 static int apply_point_result(int winner_p1, int *gp1, int *gp2) {
     if (winner_p1) {
         if (*gp1 >= 3 && *gp2 >= 3) {
@@ -367,6 +382,18 @@ static int run_match(int sock, const char *my_username, int my_player_no, const 
         }
     }
 
+    {
+        const char *server_name = initial_server_p1 ? p1_name : p2_name;
+        char toss_summary[128];
+        snprintf(toss_summary, sizeof(toss_summary), "%s won the toss, %s is serving, %s on %s side",
+                 toss_winner == 1 ? p1_name : p2_name,
+                 server_name,
+                 initial_server_p1 ? p1_name : p2_name,
+                 (initial_server_p1 ? side_p1 : (1 - side_p1)) == SIDE_RAMANUJAN ? "Ramanujan" : "Lilavati");
+        write_score_snapshot(p1_name, p2_name, 0, 0, 0, 0, server_name, toss_summary);
+        if (sock >= 0) send(sock, "SCORE_UPDATE\n", 13, 0);
+    }
+
     int games_p1 = 0, games_p2 = 0;
     int gp1 = 0, gp2 = 0;
     printf("\n========================================\n");
@@ -384,7 +411,9 @@ static int run_match(int sock, const char *my_username, int my_player_no, const 
         printf("========================================\n");
         printf("Game %d\n", game_index + 1);
         printf("Set score: %s %d - %d %s\n", server_name,
-               server_is_p1 ? games_p1 : games_p2, server_is_p1 ? games_p2 : games_p1, receiver_name);
+               server_is_p1 ? games_p1 : games_p2,
+               server_is_p1 ? games_p2 : games_p1,
+               receiver_name);
         printf("Current side: %s\n", my_side == SIDE_RAMANUJAN ? "Ramanujan" : "Lilavati");
         printf("========================================\n");
 
@@ -468,9 +497,8 @@ static int run_match(int sock, const char *my_username, int my_player_no, const 
                     gp1 = 0;
                     gp2 = 0;
                 }
-                write_score_snapshot(my_is_p1 ? my_username : opponent_username,
-                                     my_is_p1 ? opponent_username : my_username,
-                                     games_p1, games_p2, gp1, gp2);
+                const char *server_name = server_is_p1 ? p1_name : p2_name;
+                write_score_snapshot(p1_name, p2_name, games_p1, games_p2, gp1, gp2, server_name, "");
                 if (sock >= 0) {
                     send(sock, "SCORE_UPDATE\n", 13, 0);
                 }
@@ -494,14 +522,24 @@ static int run_match(int sock, const char *my_username, int my_player_no, const 
             int server_points = server_is_p1 ? gp1 : gp2;
             int receiver_points = server_is_p1 ? gp2 : gp1;
             format_game_points(server_points, receiver_points, game_points_display, sizeof(game_points_display));
+            const char *server_name = server_is_p1 ? p1_name : p2_name;
+            const char *receiver_name = server_is_p1 ? p2_name : p1_name;
             const char *point_winner_name = (point_winner_p1 == 1) ? p1_name : p2_name;
+            char left_score[32] = "";
+            char right_score[32] = "";
+            sscanf(game_points_display, "%31[^-]-%31s", left_score, right_score);
             printf("\n----------------------------------------\n");
-            printf("**Point won by: %s**\n", point_winner_name);
-            printf("**Game points: %s**\n", game_points_display);
+            printf("\033[1mPoint won by: %s\033[0m\n", point_winner_name);
+            printf("\033[1mGame points: %s %s - %s %s\033[0m\n", server_name,
+                   left_score[0] ? left_score : game_points_display,
+                   receiver_name,
+                   right_score[0] ? right_score : "");
             printf("----------------------------------------\n");
 
             if (game_winner == 1 || game_winner == 2) {
                 const char *game_winner_name = (game_winner == 1) ? p1_name : p2_name;
+                const char *server_name = server_is_p1 ? p1_name : p2_name;
+                const char *receiver_name = server_is_p1 ? p2_name : p1_name;
                 printf("\n========================================\n");
                 printf("Game won by: %s\n", game_winner_name);
                 printf("Set score: %s %d - %d %s\n", server_name,

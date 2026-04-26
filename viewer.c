@@ -68,37 +68,160 @@ static int recv_line(int sock, char *buf, size_t buflen) {
     }
 }
 
-static void print_score_file_snapshot(void) {
-    int fd = open(SCORE_FILE, O_RDONLY);
-    if (fd < 0) {
-        printf("\n[Viewer] Score file not available yet.\n");
-        return;
-    }
+static int match_active = 0;
+static int last_set1 = -1;
+static int last_set2 = -1;
+static char last_game_points[32] = "";
+static char last_p1_name[32] = "";
+static char last_p2_name[32] = "";
+static char last_serving_name[32] = "";
+static char last_toss_summary[256] = "";
 
-    struct flock lock;
-    memset(&lock, 0, sizeof(lock));
-    lock.l_type = F_RDLCK;
-    lock.l_whence = SEEK_SET;
-    if (fcntl(fd, F_SETLKW, &lock) == -1) {
-        close(fd);
-        return;
-    }
+static int split_game_points(const char *game_points, char *left, char *right, size_t len) {
+    const char *sep = strchr(game_points, '-');
+    if (!sep) return 0;
+    size_t left_len = sep - game_points;
+    size_t right_len = strlen(sep + 1);
+    if (left_len >= len || right_len >= len) return 0;
+    memcpy(left, game_points, left_len);
+    left[left_len] = '\0';
+    strncpy(right, sep + 1, len - 1);
+    right[len - 1] = '\0';
+    return 1;
+}
+
+static int read_score_snapshot(int *set1, int *set2, char *p1_name, char *p2_name,
+                               char *game_points, size_t game_points_len,
+                               char *serving_name, size_t serving_len,
+                               char *toss_summary, size_t toss_summary_len) {
+    int fd = open(SCORE_FILE, O_RDONLY);
+    if (fd < 0) return 0;
 
     char data[1024];
     ssize_t n = read(fd, data, sizeof(data) - 1);
-    if (n > 0) {
-        data[n] = '\0';
-        printf("\n============= LIVE MATCH SCORE =============\n%s============================================\n", data);
-    }
-
-    lock.l_type = F_UNLCK;
-    fcntl(fd, F_SETLK, &lock);
     close(fd);
+    if (n <= 0) return 0;
+    data[n] = '\0';
+
+    *set1 = -1;
+    *set2 = -1;
+    p1_name[0] = '\0';
+    p2_name[0] = '\0';
+    game_points[0] = '\0';
+    serving_name[0] = '\0';
+    toss_summary[0] = '\0';
+
+    char *line = strtok(data, "\n");
+    while (line) {
+        if (strncmp(line, "Set Games:", 10) == 0) {
+            sscanf(line, "Set Games: %31s %d - %d %31s", p1_name, set1, set2, p2_name);
+        } else if (strncmp(line, "Current Game Points:", 20) == 0) {
+            const char *p = line + 20;
+            while (*p == ' ') p++;
+            strncpy(game_points, p, game_points_len - 1);
+            game_points[game_points_len - 1] = '\0';
+        } else if (strncmp(line, "Serving:", 8) == 0) {
+            const char *p = line + 8;
+            while (*p == ' ') p++;
+            strncpy(serving_name, p, serving_len - 1);
+            serving_name[serving_len - 1] = '\0';
+        } else if (strncmp(line, "Toss:", 5) == 0) {
+            const char *p = line + 5;
+            while (*p == ' ') p++;
+            strncpy(toss_summary, p, toss_summary_len - 1);
+            toss_summary[toss_summary_len - 1] = '\0';
+        }
+        line = strtok(NULL, "\n");
+    }
+    return (*set1 >= 0 && *set2 >= 0 && p1_name[0] && p2_name[0] && game_points[0] != '\0');
+}
+
+static void print_match_header(const char *left_name, int left_set, int right_set,
+                               const char *right_name, const char *game_points,
+                               const char *toss_summary) {
+    char left_score[32];
+    char right_score[32];
+    printf("\n============= LIVE MATCH SCORE =============\n");
+    printf("Set Games: %s %d - %d %s\n", left_name, left_set, right_set, right_name);
+    if (split_game_points(game_points, left_score, right_score, sizeof(left_score))) {
+        printf("Current Game Points: %s %s - %s %s\n", left_name, left_score, right_score, right_name);
+    } else {
+        printf("Current Game Points: %s\n", game_points);
+    }
+    if (toss_summary[0]) {
+        printf("Toss: %s\n", toss_summary);
+    }
+}
+
+static void print_game_update(const char *left_name, const char *right_name, const char *game_points) {
+    char left_score[32];
+    char right_score[32];
+    if (split_game_points(game_points, left_score, right_score, sizeof(left_score))) {
+        printf("\nCurrent Game Points: %s %s - %s %s\n", left_name, left_score, right_score, right_name);
+    } else {
+        printf("\nCurrent Game Points: %s\n", game_points);
+    }
+}
+
+static void print_set_update(const char *left_name, int left_set, int right_set, const char *right_name,
+                             const char *game_points) {
+    char left_score[32];
+    char right_score[32];
+    printf("\nSet Games: %s %d - %d %s\n", left_name, left_set, right_set, right_name);
+    if (split_game_points(game_points, left_score, right_score, sizeof(left_score))) {
+        printf("Current Game Points: %s %s - %s %s\n", left_name, left_score, right_score, right_name);
+    } else {
+        printf("Current Game Points: %s\n", game_points);
+    }
 }
 
 static int handle_server_line(const char *line, int *logged_in, char *logged_in_username) {
     if (strcmp(line, "SCORE_UPDATE") == 0) {
-        print_score_file_snapshot();
+        int set1 = -1;
+        int set2 = -1;
+        char p1_name[32] = "";
+        char p2_name[32] = "";
+        char game_points[32] = "";
+        char serving_name[32] = "";
+        char toss_summary[256] = "";
+        if (read_score_snapshot(&set1, &set2, p1_name, p2_name, game_points, sizeof(game_points), serving_name, sizeof(serving_name), toss_summary, sizeof(toss_summary))) {
+            const char *left_name = serving_name[0] ? serving_name : p1_name;
+            const char *right_name = (strcmp(left_name, p1_name) == 0) ? p2_name : p1_name;
+            int left_set = (strcmp(left_name, p1_name) == 0) ? set1 : set2;
+            int right_set = (strcmp(left_name, p1_name) == 0) ? set2 : set1;
+            if (!match_active) {
+                match_active = 1;
+                last_set1 = set1;
+                last_set2 = set2;
+                strncpy(last_p1_name, p1_name, sizeof(last_p1_name) - 1);
+                last_p1_name[sizeof(last_p1_name) - 1] = '\0';
+                strncpy(last_p2_name, p2_name, sizeof(last_p2_name) - 1);
+                last_p2_name[sizeof(last_p2_name) - 1] = '\0';
+                strncpy(last_serving_name, serving_name, sizeof(last_serving_name) - 1);
+                last_serving_name[sizeof(last_serving_name) - 1] = '\0';
+                strncpy(last_toss_summary, toss_summary, sizeof(last_toss_summary) - 1);
+                last_toss_summary[sizeof(last_toss_summary) - 1] = '\0';
+                strncpy(last_game_points, game_points, sizeof(last_game_points) - 1);
+                last_game_points[sizeof(last_game_points) - 1] = '\0';
+                print_match_header(left_name, left_set, right_set, right_name, game_points, toss_summary);
+            } else if (set1 != last_set1 || set2 != last_set2 || strcmp(serving_name, last_serving_name) != 0 || strcmp(toss_summary, last_toss_summary) != 0) {
+                print_set_update(left_name, left_set, right_set, right_name, game_points);
+                last_set1 = set1;
+                last_set2 = set2;
+                strncpy(last_serving_name, serving_name, sizeof(last_serving_name) - 1);
+                last_serving_name[sizeof(last_serving_name) - 1] = '\0';
+                strncpy(last_toss_summary, toss_summary, sizeof(last_toss_summary) - 1);
+                last_toss_summary[sizeof(last_toss_summary) - 1] = '\0';
+                strncpy(last_game_points, game_points, sizeof(last_game_points) - 1);
+                last_game_points[sizeof(last_game_points) - 1] = '\0';
+            } else if (strcmp(game_points, last_game_points) != 0) {
+                print_game_update(left_name, right_name, game_points);
+                strncpy(last_game_points, game_points, sizeof(last_game_points) - 1);
+                last_game_points[sizeof(last_game_points) - 1] = '\0';
+            }
+        } else {
+            printf("\n[Viewer] Unable to read score file.\n");
+        }
         return 1;
     }
     printf("Server: %s\n", line);
@@ -126,7 +249,7 @@ int main(void) {
     }
 
     while (1) {
-        if (logged_in) {
+        if (logged_in && !match_active) {
             printf("\nLogged in as %s\n", logged_in_username);
             printf("1) Logout\n");
             printf("2) Quit\n");
@@ -139,6 +262,21 @@ int main(void) {
             FD_SET(sock, &wait_set);
             int maxfd = (sock > STDIN_FILENO) ? sock : STDIN_FILENO;
             int ready = select(maxfd + 1, &wait_set, NULL, NULL, NULL);
+            if (ready < 0) {
+                perror("select");
+                break;
+            }
+            if (FD_ISSET(sock, &wait_set)) {
+                n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
+                if (n <= 0) break;
+                handle_server_line(recv_buffer, &logged_in, logged_in_username);
+                continue;
+            }
+        } else if (logged_in && match_active) {
+            fd_set wait_set;
+            FD_ZERO(&wait_set);
+            FD_SET(sock, &wait_set);
+            int ready = select(sock + 1, &wait_set, NULL, NULL, NULL);
             if (ready < 0) {
                 perror("select");
                 break;
