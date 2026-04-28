@@ -1,4 +1,0 @@
-Match Score
-Set Games: h 0 - 1 n
-Current Game Points: 0-15
-Serving: h
