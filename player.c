@@ -15,6 +15,7 @@
 #define SERVER_PORT 9001
 #define SERVER_ADDR "127.0.0.1"
 #define MAX_LINE 512
+#define WIN_GAMES 1
 #define SCORE_FILE_TEMPLATE "/tmp/match_score_%d.txt"
 #define POINTS_FILE "points_table.txt"
 
@@ -73,6 +74,25 @@ static int recv_line(int sock, char *out, size_t outlen) {
         if (n <= 0) return (int)n;
         g_rb.len += (size_t)n;
     }
+}
+
+static int recv_line_from_buffer(char *out, size_t outlen) {
+    for (size_t i = 0; i < g_rb.len; i++) {
+        if (g_rb.buf[i] == '\n') {
+            size_t copy = i < outlen - 1 ? i : outlen - 1;
+            memcpy(out, g_rb.buf, copy);
+            out[copy] = '\0';
+            size_t remain = g_rb.len - (i + 1);
+            memmove(g_rb.buf, g_rb.buf + i + 1, remain);
+            g_rb.len = remain;
+            return (int)copy;
+        }
+    }
+    return 0;
+}
+
+static int buffer_has_line(void) {
+    return memchr(g_rb.buf, '\n', g_rb.len) != NULL;
 }
 
 static int timed_menu_choice(int seconds, int min_choice, int max_choice, int *choice_out, double *elapsed_out) {
@@ -370,7 +390,7 @@ static int run_match(int sock, const char *my_username, int my_player_no, const 
     int gp1 = 0, gp2 = 0;
     printf("\n========================================\nMatch play begins now.\n");
 
-    while (games_p1 < 6 && games_p2 < 6) {
+    while (games_p1 < WIN_GAMES && games_p2 < WIN_GAMES) {
         int game_index = games_p1 + games_p2;
         int server_is_p1 = (game_index % 2 == 0) ? initial_server_p1 : !initial_server_p1;
         int i_serve_this_game = (server_is_p1 == my_is_p1);
@@ -504,7 +524,7 @@ static int run_match(int sock, const char *my_username, int my_player_no, const 
     }
 
     {
-        int p1_won = games_p1 >= 6;
+        int p1_won = games_p1 >= WIN_GAMES;
         const char *set_winner = p1_won ? p1_name : p2_name;
         printf("\n========================================\nMATCH COMPLETE\nWinner: %s\n", set_winner);
         printf("Final set score: %s %d - %d %s\n========================================\n",
@@ -568,6 +588,13 @@ static int handle_server_line(int sock, int logged_in, const char *my_username, 
         return 1;
     }
 
+    if (strncmp(line, "MATCH_LIST_BEGIN", 16) == 0 ||
+        strncmp(line, "MATCH_INFO", 10) == 0 ||
+        strcmp(line, "END_MATCH_LIST") == 0 ||
+        strncmp(line, "WATCH_INFO", 10) == 0) {
+        return 1;
+    }
+
     return 0;
 }
 
@@ -601,10 +628,32 @@ int main(void) {
             if (FD_ISSET(sock, &wait_set)) {
                 int n = recv_line(sock, recv_buffer, sizeof(recv_buffer));
                 if (n <= 0) break;
-                if (handle_server_line(sock, logged_in, logged_in_username, recv_buffer)) continue;
+                if (handle_server_line(sock, logged_in, logged_in_username, recv_buffer)) {
+                    while (buffer_has_line()) {
+                        n = recv_line_from_buffer(recv_buffer, sizeof(recv_buffer));
+                        if (n <= 0) break;
+                        if (!handle_server_line(sock, logged_in, logged_in_username, recv_buffer)) {
+                            printf("\nServer: %s\n", recv_buffer);
+                            if (strcmp(recv_buffer, "OK Logout successful") == 0) {
+                                logged_in = 0; logged_in_username[0] = '\0';
+                            }
+                        }
+                    }
+                    continue;
+                }
                 printf("\nServer: %s\n", recv_buffer);
                 if (strcmp(recv_buffer, "OK Logout successful") == 0) {
                     logged_in = 0; logged_in_username[0] = '\0';
+                }
+                while (buffer_has_line()) {
+                    n = recv_line_from_buffer(recv_buffer, sizeof(recv_buffer));
+                    if (n <= 0) break;
+                    if (!handle_server_line(sock, logged_in, logged_in_username, recv_buffer)) {
+                        printf("\nServer: %s\n", recv_buffer);
+                        if (strcmp(recv_buffer, "OK Logout successful") == 0) {
+                            logged_in = 0; logged_in_username[0] = '\0';
+                        }
+                    }
                 }
                 continue;
             }
@@ -631,6 +680,16 @@ int main(void) {
                 printf("Server: %s\n", recv_buffer);
                 if (strcmp(recv_buffer, "OK Logout successful") == 0) {
                     logged_in = 0; logged_in_username[0] = '\0';
+                }
+            }
+            while (buffer_has_line()) {
+                n = recv_line_from_buffer(recv_buffer, sizeof(recv_buffer));
+                if (n <= 0) break;
+                if (!handle_server_line(sock, logged_in, logged_in_username, recv_buffer)) {
+                    printf("Server: %s\n", recv_buffer);
+                    if (strcmp(recv_buffer, "OK Logout successful") == 0) {
+                        logged_in = 0; logged_in_username[0] = '\0';
+                    }
                 }
             }
 

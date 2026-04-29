@@ -281,10 +281,9 @@ static void handle_match_complete(int sock, RecvBuf *rb, const char *msg) {
         }
     }
 
-    /* Notify server that points table has been updated */
+    /* Notify server that points table has been updated. The server broadcasts POINTS_UPDATE
+       to logged-in clients, and the admin main loop will handle any notification lines when ready. */
     send(sock, "POINTS_UPDATED\n", 15, 0);
-    char resp[MAX_LINE];
-    recv_line_buf(sock, rb, resp, sizeof(resp));
 
     display_points_table();
     display_matches();
@@ -361,6 +360,12 @@ int main(void) {
 
                 if (strcmp(recv_buffer, "POINTS_UPDATE") == 0) {
                     /* Points table already updated by us; ignore */
+                    continue;
+                }
+
+                if (strncmp(recv_buffer, "MATCH_LIST_BEGIN", 16) == 0 ||
+                    strncmp(recv_buffer, "MATCH_INFO", 10) == 0 ||
+                    strcmp(recv_buffer, "END_MATCH_LIST") == 0) {
                     continue;
                 }
 

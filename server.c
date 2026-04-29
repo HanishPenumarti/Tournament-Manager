@@ -107,6 +107,7 @@ typedef struct {
 /* Tournament data – written/read under tournament_mutex */
 static Match matches[MAX_MATCHES];
 static int match_count = 0;
+static int next_match_id = 1;
 static char registered_players[MAX_PLAYERS][32];
 static int tournament_started = 0;   /* 1 once admin begins group stage */
 static int group_stage_done = 0;
@@ -290,7 +291,7 @@ static void generate_group_schedule(void) {
         for (int i = 0; i < half; i++) {
             for (int j = i + 1; j < half; j++) {
                 Match *m = &matches[match_count];
-                m->match_id = match_count + 1;
+                m->match_id = next_match_id++;
                 m->stage = STAGE_GROUP;
                 m->group = g;
                 strncpy(m->p1, registered_players[base + i], 31);
@@ -412,9 +413,8 @@ static void generate_knockout(void) {
     compute_group_standings(1, sb, &cb);
 
     /* Semi 1: A1 vs B2 */
-    Match *s1 = &matches[match_count];
-    s1->match_id = match_count + 1;
-    match_count++;
+    Match *s1 = &matches[match_count++];
+    s1->match_id = next_match_id++;
     s1->stage = STAGE_SEMI;
     s1->group = -1;
     strncpy(s1->p1, sa[0].name, 31);
@@ -423,9 +423,8 @@ static void generate_knockout(void) {
     s1->status = MATCH_PENDING;
 
     /* Semi 2: B1 vs A2 */
-    Match *s2 = &matches[match_count];
-    s2->match_id = match_count + 1;
-    match_count++;
+    Match *s2 = &matches[match_count++];
+    s2->match_id = next_match_id++;
     s2->stage = STAGE_SEMI;
     s2->group = -1;
     strncpy(s2->p1, sb[0].name, 31);
@@ -448,14 +447,14 @@ static void generate_final(void) {
     }
     if (sw < 2) return;
     Match *f = &matches[match_count];
-    f->match_id = match_count + 1;
-    match_count++;
+    f->match_id = next_match_id++;
     f->stage = STAGE_FINAL;
     f->group = -1;
     strncpy(f->p1, semi_winners[0], 31);
     strncpy(f->p2, semi_winners[1], 31);
     f->winner[0] = '\0';
     f->status = MATCH_PENDING;
+    match_count++;
 }
 
 /* ===== Called when a match is completed (MATCH_DONE/BYE) ===== */

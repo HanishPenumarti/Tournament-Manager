@@ -41,6 +41,14 @@ static int connect_to_server(void) {
 /* ===== Per-connection recv buffer ===== */
 typedef struct { char buf[MAX_LINE]; size_t len; } RecvBuf;
 
+static void show_points_table(void);
+static void handle_score_update(void);
+static int recv_line_from_buffer(RecvBuf *rb, char *out, size_t outlen);
+static int buffer_has_line(RecvBuf *rb);
+static int recv_line_skip_notifications(int sock, RecvBuf *rb, char *out, size_t outlen, int expect_match_list);
+static int recv_line_until_match_list(int sock, RecvBuf *rb, char *out, size_t outlen);
+static int watching_match_id = -1;
+
 static int recv_line_rb(int sock, RecvBuf *rb, char *out, size_t outlen) {
     while (1) {
         for (size_t i = 0; i < rb->len; i++) {
@@ -57,6 +65,79 @@ static int recv_line_rb(int sock, RecvBuf *rb, char *out, size_t outlen) {
         ssize_t n = recv(sock, rb->buf + rb->len, sizeof(rb->buf) - rb->len - 1, 0);
         if (n <= 0) return (int)n;
         rb->len += (size_t)n;
+    }
+}
+
+static int recv_line_from_buffer(RecvBuf *rb, char *out, size_t outlen) {
+    for (size_t i = 0; i < rb->len; i++) {
+        if (rb->buf[i] == '\n') {
+            size_t copy = i < outlen - 1 ? i : outlen - 1;
+            memcpy(out, rb->buf, copy);
+            out[copy] = '\0';
+            size_t remain = rb->len - (i + 1);
+            memmove(rb->buf, rb->buf + i + 1, remain);
+            rb->len = remain;
+            return (int)copy;
+        }
+    }
+    return 0;
+}
+
+static int buffer_has_line(RecvBuf *rb) {
+    return memchr(rb->buf, '\n', rb->len) != NULL;
+}
+
+static int recv_line_skip_notifications(int sock, RecvBuf *rb, char *out, size_t outlen, int expect_match_list) {
+    while (1) {
+        int n = recv_line_rb(sock, rb, out, outlen);
+        if (n <= 0) return n;
+        if (strcmp(out, "SCORE_UPDATE") == 0) {
+            if (watching_match_id >= 0) handle_score_update();
+            continue;
+        }
+        if (strcmp(out, "MATCH_LIST_UPDATE") == 0) {
+            printf("\n[Tournament update: new matches available.]\n");
+            continue;
+        }
+        if (strcmp(out, "POINTS_UPDATE") == 0) {
+            printf("\n[Points table has been updated.]\n");
+            show_points_table();
+            continue;
+        }
+        if (!expect_match_list &&
+            (strncmp(out, "MATCH_LIST_BEGIN", 16) == 0 ||
+             strncmp(out, "MATCH_INFO", 10) == 0 ||
+             strcmp(out, "END_MATCH_LIST") == 0)) {
+            continue;
+        }
+        return n;
+    }
+}
+
+static int recv_line_until_match_list(int sock, RecvBuf *rb, char *out, size_t outlen) {
+    while (1) {
+        int n = recv_line_rb(sock, rb, out, outlen);
+        if (n <= 0) return n;
+        if (strcmp(out, "SCORE_UPDATE") == 0) {
+            if (watching_match_id >= 0) handle_score_update();
+            continue;
+        }
+        if (strcmp(out, "MATCH_LIST_UPDATE") == 0) {
+            printf("\n[Tournament update: new matches available.]\n");
+            continue;
+        }
+        if (strcmp(out, "POINTS_UPDATE") == 0) {
+            printf("\n[Points table has been updated.]\n");
+            show_points_table();
+            continue;
+        }
+        if (strncmp(out, "MATCH_LIST_BEGIN", 16) == 0) {
+            return n;
+        }
+        if (strncmp(out, "MATCH_INFO", 10) == 0 || strcmp(out, "END_MATCH_LIST") == 0) {
+            continue;
+        }
+        return n;
     }
 }
 
@@ -77,10 +158,10 @@ static int match_list_count = 0;
 static int fetch_match_list(int sock, RecvBuf *rb) {
     send(sock, "GET_MATCH_LIST\n", 15, 0);
     char line[MAX_LINE];
-    int n = recv_line_rb(sock, rb, line, sizeof(line));
+    int n = recv_line_until_match_list(sock, rb, line, sizeof(line));
     if (n <= 0) return 0;
     int total = 0;
-    sscanf(line, "MATCH_LIST_BEGIN %d", &total);
+    if (sscanf(line, "MATCH_LIST_BEGIN %d", &total) != 1) return 0;
     match_list_count = 0;
     for (int i = 0; i < total && i < MAX_MATCHES; i++) {
         n = recv_line_rb(sock, rb, line, sizeof(line));
@@ -133,7 +214,6 @@ static char last_p1_name[32] = "";
 static char last_p2_name[32] = "";
 static char last_serving_name[32] = "";
 static char last_toss_summary[256] = "";
-static int watching_match_id = -1;
 
 static void reset_watch_state(void) {
     last_set1 = -1; last_set2 = -1;
@@ -162,8 +242,18 @@ static int read_score_file(int match_id,
     snprintf(fname, sizeof(fname), SCORE_FILE_TEMPLATE, match_id);
     int fd = open(fname, O_RDONLY);
     if (fd < 0) return 0;
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_RDLCK;
+    lock.l_whence = SEEK_SET;
+    if (fcntl(fd, F_SETLKW, &lock) == -1) {
+        close(fd);
+        return 0;
+    }
     char data[1024];
     ssize_t n = read(fd, data, sizeof(data)-1);
+    lock.l_type = F_UNLCK;
+    fcntl(fd, F_SETLK, &lock);
     close(fd);
     if (n <= 0) return 0;
     data[n] = '\0';
@@ -210,7 +300,6 @@ static void handle_score_update(void) {
     char p1[32], p2[32], gp[32], sv[32], ts[256];
     if (!read_score_file(watching_match_id, &set1, &set2,
                          p1, p2, gp, sizeof(gp), sv, sizeof(sv), ts, sizeof(ts))) {
-        printf("\n[Viewer] Unable to read score file for match %d.\n", watching_match_id);
         return;
     }
     const char *ln = sv[0] ? sv : p1;
@@ -269,7 +358,7 @@ static int pick_match_to_watch(int sock, RecvBuf *rb) {
     snprintf(cmd, sizeof(cmd), "WATCH_MATCH %d\n", mid);
     send(sock, cmd, strlen(cmd), 0);
     char resp[MAX_LINE];
-    if (recv_line_rb(sock, rb, resp, sizeof(resp)) <= 0) return -1;
+    if (recv_line_skip_notifications(sock, rb, resp, sizeof(resp), 0) <= 0) return -1;
     if (strncmp(resp, "ERROR", 5) == 0) {
         printf("Server: %s\n", resp);
         return -1;
@@ -293,7 +382,7 @@ int main(void) {
     char logged_in_username[64] = "";
     char recv_buffer[MAX_LINE];
 
-    if (recv_line_rb(sock, &rb, recv_buffer, sizeof(recv_buffer)) > 0)
+    if (recv_line_skip_notifications(sock, &rb, recv_buffer, sizeof(recv_buffer), 0) > 0)
         printf("%s\n", recv_buffer);
 
     while (1) {
@@ -312,17 +401,18 @@ int main(void) {
                 char buf[MAX_LINE];
                 snprintf(buf, sizeof(buf), "CHECK viewer %s\n", username);
                 send(sock, buf, strlen(buf), 0);
-                int n = recv_line_rb(sock, &rb, recv_buffer, sizeof(recv_buffer));
+                int n = recv_line_skip_notifications(sock, &rb, recv_buffer, sizeof(recv_buffer), 0);
                 if (n <= 0) break;
                 if (strncmp(recv_buffer, "OK AVAILABLE", 12) != 0) {
-                    printf("Server: %s\n", recv_buffer); continue;
+                    printf("Server: %s\n", recv_buffer);
+                    continue;
                 }
                 printf("Password: ");
                 if (!fgets(password, sizeof(password), stdin)) break;
                 trim_newline(password);
                 snprintf(buf, sizeof(buf), "REGISTER viewer %s %s\n", username, password);
                 send(sock, buf, strlen(buf), 0);
-                n = recv_line_rb(sock, &rb, recv_buffer, sizeof(recv_buffer));
+                n = recv_line_skip_notifications(sock, &rb, recv_buffer, sizeof(recv_buffer), 0);
                 if (n <= 0) break;
                 printf("Server: %s\n", recv_buffer);
             } else if (strcmp(choice, "2") == 0) {
@@ -333,7 +423,7 @@ int main(void) {
                 char buf[MAX_LINE];
                 snprintf(buf, sizeof(buf), "CHECK viewer %s\n", username);
                 send(sock, buf, strlen(buf), 0);
-                int n = recv_line_rb(sock, &rb, recv_buffer, sizeof(recv_buffer));
+                int n = recv_line_skip_notifications(sock, &rb, recv_buffer, sizeof(recv_buffer), 0);
                 if (n <= 0) break;
                 if (strncmp(recv_buffer, "OK EXISTS", 9) != 0) {
                     printf("Server: ERROR No account found\n"); continue;
@@ -344,7 +434,7 @@ int main(void) {
                 snprintf(buf, sizeof(buf), "LOGIN viewer %s %s\n", username, password);
                 send(sock, buf, strlen(buf), 0);
                 strcpy(logged_in_username, username);
-                n = recv_line_rb(sock, &rb, recv_buffer, sizeof(recv_buffer));
+                n = recv_line_skip_notifications(sock, &rb, recv_buffer, sizeof(recv_buffer), 0);
                 if (n <= 0) break;
                 printf("Server: %s\n", recv_buffer);
                 if (strcmp(recv_buffer, "OK Login successful") == 0) logged_in = 1;
@@ -386,10 +476,35 @@ int main(void) {
                 } else if (strcmp(recv_buffer, "POINTS_UPDATE") == 0) {
                     printf("\n[Points table has been updated.]\n");
                     show_points_table();
+                } else if (strncmp(recv_buffer, "MATCH_LIST_BEGIN", 16) == 0 ||
+                           strncmp(recv_buffer, "MATCH_INFO", 10) == 0 ||
+                           strcmp(recv_buffer, "END_MATCH_LIST") == 0) {
+                    /* stray match-list response from earlier fetch; ignore */
                 } else {
                     printf("Server: %s\n", recv_buffer);
                     if (strcmp(recv_buffer, "OK Logout successful") == 0) {
                         logged_in = 0; logged_in_username[0] = '\0'; watching_match_id = -1;
+                    }
+                }
+                while (buffer_has_line(&rb)) {
+                    n = recv_line_from_buffer(&rb, recv_buffer, sizeof(recv_buffer));
+                    if (n <= 0) break;
+                    if (strcmp(recv_buffer, "SCORE_UPDATE") == 0) {
+                        /* No match selected – ignore score updates */
+                    } else if (strcmp(recv_buffer, "MATCH_LIST_UPDATE") == 0) {
+                        printf("\n[Tournament update: new matches available.]\n");
+                    } else if (strcmp(recv_buffer, "POINTS_UPDATE") == 0) {
+                        printf("\n[Points table has been updated.]\n");
+                        show_points_table();
+                    } else if (strncmp(recv_buffer, "MATCH_LIST_BEGIN", 16) == 0 ||
+                               strncmp(recv_buffer, "MATCH_INFO", 10) == 0 ||
+                               strcmp(recv_buffer, "END_MATCH_LIST") == 0) {
+                        /* stray match-list response from earlier fetch; ignore */
+                    } else {
+                        printf("Server: %s\n", recv_buffer);
+                        if (strcmp(recv_buffer, "OK Logout successful") == 0) {
+                            logged_in = 0; logged_in_username[0] = '\0'; watching_match_id = -1;
+                        }
                     }
                 }
                 continue;
@@ -409,7 +524,7 @@ int main(void) {
                 char buf[MAX_LINE];
                 snprintf(buf, sizeof(buf), "LOGOUT viewer %s\n", logged_in_username);
                 send(sock, buf, strlen(buf), 0);
-                int n = recv_line_rb(sock, &rb, recv_buffer, sizeof(recv_buffer));
+                int n = recv_line_skip_notifications(sock, &rb, recv_buffer, sizeof(recv_buffer), 0);
                 if (n <= 0) break;
                 printf("Server: %s\n", recv_buffer);
                 if (strcmp(recv_buffer, "OK Logout successful") == 0) {
@@ -469,6 +584,10 @@ int main(void) {
                     printf("\n[Points table updated.]\n");
                     show_points_table();
 
+                } else if (strncmp(recv_buffer, "MATCH_LIST_BEGIN", 16) == 0 ||
+                           strncmp(recv_buffer, "MATCH_INFO", 10) == 0 ||
+                           strcmp(recv_buffer, "END_MATCH_LIST") == 0) {
+                    continue;
                 } else {
                     printf("Server: %s\n", recv_buffer);
                     if (strcmp(recv_buffer, "OK Logout successful") == 0) {
